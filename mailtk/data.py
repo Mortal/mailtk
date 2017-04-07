@@ -42,10 +42,59 @@ class Flag(Enum):
     forwarded = 'forwarded'
 
 
-class ThreadInfo(namedtuple.abc):
+class MessageBase(namedtuple.abc):
+    '''
+    flag: Flag
+    size: int
+    date: datetime.datetime
+    sender: ?address
+    recipients: list of ?address
+    subject: str
+    excerpt: str
+    - Short substring of body text
+    message_id: str
+    - RFC822.Message-Id header
+    folder_key: hashable, account-specific
+    key: hashable, account-specific
+    parent_key: hashable, account-specific
+    '''
     _fields = ('flag', 'size', 'date', 'sender', 'recipients', 'subject',
-               'children', 'excerpt', 'message_id')
+               'excerpt', 'message_id', 'folder_key', 'key', 'parent_key')
 
 
 class Mailbox(namedtuple.abc):
-    _fields = 'name children'
+    _fields = 'name key parent_key'
+
+
+class AccountData:
+    def __init__(self, account_key):
+        self.account_key = account_key
+
+    def set_folder(self, folder: Mailbox):
+        self._folders[folder.key] = folder
+
+    def set_folder_set(self, keys):
+        stale = set(self._folders.keys()) - set(keys)
+        for o in stale:
+            del self._folders[o]
+
+    def set_folder_parent(self, folder_key, parent_key):
+        raise NotImplementedError
+
+    def set_message(self, message: MessageBase):
+        self._messages[message.key] = message
+
+    def set_message_parent(self, message_key, parent_key):
+        self._messages[message_key] = (
+            self._messages[message_key].replace_parent(parent_key))
+
+    def set_message_set(self, keys):
+        stale = set(self._messages.keys()) - set(keys)
+        for o in stale:
+            del self._messages[o]
+        stale = set(self._message_data.keys()) - set(keys)
+        for o in stale:
+            del self._message_data[o]
+
+    def set_message_data(self, message_key, message_data):
+        self._message_data[message_key] = message_data

@@ -44,12 +44,12 @@ def get_account(fields):
     class_ = getattr(module, class_name)
     password_spec = fields.pop('password', None)
 
-    async def initialize(controller):
+    async def initialize(loop):
         if password_spec is not None:
             password = await get_password_from_spec(
-                controller.loop, password_spec)
+                loop, password_spec)
             fields['password'] = password
-        return await class_.initialize(controller.loop, **fields)
+        return await class_.initialize(loop, **fields)
 
     return initialize
 

@@ -7,27 +7,30 @@ import queue
 import asyncio
 import threading
 
-from mailtk.data import Mailbox, ThreadInfo, Flag, namedtuple
+from mailtk.data import Mailbox, MessageBase, Flag, namedtuple
 
 from imapclient import IMAPClient
 import email
 import imapclient
 from mailtk.util import decode_any_header
-from mailtk.accounts.base import AccountBase
+from mailtk.accounts.base import AccountBase, AccountData, Pending
 
 
-class ThreadMessage(namedtuple.abc):
+asyncio.Event
+
+
+class _ThreadMessage(namedtuple.abc):
     _fields = (
         'flag', 'size', 'date', 'from_', 'to', 'cc', 'subject',
-        'message_id', 'references', 'in_reply_to', 'key', 'children')
+        'message_id', 'references', 'in_reply_to')
 
 
 class MailboxImap(Mailbox):
-    _fields = 'flags path'
+    _fields = 'flags'
 
-
-class ThreadInfoImap(ThreadInfo):
-    _fields = 'mailbox message_key'
+    @property
+    def path(self):
+        return self.key
 
 
 def imap_unescape(v):
@@ -47,9 +50,11 @@ class ImapAccount(AccountBase):
         await imap.backend.login(username, password)
         return imap
 
-    def __init__(self, loop, host, port, ssl):
+    def __init__(self, loop, host, port, ssl, account_data: AccountData):
         self.backend = ImapBackend(loop, host, port, ssl)
+        self.frontend = account_data
         self._selected_folder = None
+        self._uidvalidity_counter = 0  # Used if server doesn't send UIDVALIDITY
 
     async def connect(self):
         await self.backend.connect()
@@ -68,20 +73,25 @@ class ImapAccount(AccountBase):
         return data
 
     async def list_folders(self):
-        mailboxes = {}
-        children = {}
+        add_inbox = True
+        existing_folders = []
         for flags, delimiter, path in await self.backend.list_folders():
             delimiter = (delimiter or b'').decode()
             parent, sep, name = path.rpartition(delimiter)
-            c = children.setdefault(path, [])
-            m = mailboxes[path] = MailboxImap(
-                Mailbox(name, c), flags, path)
-            children.setdefault(parent, []).append(m)
-        if not any(m.lower() == 'inbox' for m in mailboxes.keys()):
+            m = MailboxImap(
+                Mailbox(name, path, parent or None), flags)
+            self.frontend.set_folder(m)
+            existing_folders.append(path)
+            if name.upper() == 'INBOX':
+                add_inbox = False
+        if add_inbox:
             print("Inserting INBOX")
-            m = mailboxes['INBOX'] = Mailbox('INBOX', [])
-            children.setdefault('', []).insert(0, m)
-        return children['']
+            # TODO what is the 'flags' of INBOX?
+            m = MailboxImap(
+                Mailbox('INBOX', 'INBOX', None), None)
+            self.frontend.set_folder(m)
+            existing_folders.append('INBOX')
+        self.frontend.set_folder_set(existing_folders)
 
     async def _select_folder(self, path):
         if self._selected_folder == path:
@@ -100,7 +110,7 @@ class ImapAccount(AccountBase):
         else:
             return Flag.unread
 
-    def _parse_search(self, message_key, message_value):
+    def _parse_search(self, message_value):
         message_value.pop(b'SEQ', None)
         flag = self._parse_flags(message_value.pop(b'FLAGS'))
         size = message_value.pop(b'RFC822.SIZE')
@@ -112,8 +122,7 @@ class ImapAccount(AccountBase):
             v = mime[k]
             return d if v is None else str(decode_any_header(v))
 
-        message_id = header('Message-ID')
-        return message_id, ThreadMessage(
+        return _ThreadMessage(
             flag=flag,
             size=size,
             date=email.utils.parsedate_to_datetime(
@@ -122,12 +131,32 @@ class ImapAccount(AccountBase):
             to=header('To'),
             cc=header('Cc'),
             subject=header('Subject'),
-            message_id=message_id,
+            message_id=header('Message-ID'),
             references=header('References', '').split(),
             in_reply_to=header('In-Reply-To', '').split(),
-            key=message_key,
-            children=[],
         )
+
+    def _get_fake_uidvalidity(self):
+        self._uidvalidity_counter += 1
+        return 'fake_%s' % self._uidvalidity_counter
+
+    def _convert_message(self, o: _ThreadMessage, key, parent_key):
+        folder = key[0]
+        assert isinstance(folder, MailboxImap)
+        v = MessageBase(
+            flag=o.flag,
+            size=o.size,
+            date=o.date,
+            sender=o.from_,
+            recipients=', '.join(filter(None, (o.to, o.cc))),
+            subject=o.subject,
+            excerpt='',
+            message_id=o.message_id,
+            folder_key=folder.key,
+            key=key,
+            parent_key=parent_key,
+        )
+        return v
 
     async def list_messages(self, mailbox: MailboxImap):
         # TODO: Sorting
@@ -137,67 +166,64 @@ class ImapAccount(AccountBase):
         select_response = await self._select_folder(path)
         n_messages = select_response[b'EXISTS']
         if n_messages == 0:
-            print("No messages")
             return []
-        flags = select_response[b'FLAGS']
-        recent = select_response[b'RECENT']
-        uidvalidity = select_response.get(b'UIDVALIDITY')
+        # flags = select_response[b'FLAGS']
+        # recent = select_response[b'RECENT']
+        real_uidvalidity = select_response.get(b'UIDVALIDITY')
+        if real_uidvalidity is None:
+            uidvalidity = self._get_fake_uidvalidity()
+            # gen_uidvalidity = uidvalidity
+        else:
+            uidvalidity = real_uidvalidity
 
         # TODO: Use MODSEQ in SEARCH
-        message_ids = await self.backend.search()
+        uids = await self.backend.search()
         params = [
             'FLAGS', 'RFC822.SIZE',
             'BODY.PEEK[HEADER.FIELDS (Date From To Cc Subject ' +
             'Message-ID References In-Reply-To)]']
         block_size = 4
-        for i in range(0, len(message_ids), block_size):
-            j = min(i+block_size, len(message_ids))
-            data = await self.backend.fetch(message_ids[i:j], params)
-            for uid in message_ids[i:j]:
-                m = self._parse_search(uid, data[uid])
+        children = {}
+        message_ids = {}  # map RFC822.Message-Id to MessageBase.key
+        for i in range(0, len(uids), block_size):
+            j = min(i+block_size, len(uids))
+            data = await self.backend.fetch(uids[i:j], params)
+            for uid in uids[i:j]:
+                key = (mailbox, uidvalidity, uid)
+                m = self._parse_search(data.pop(uid))
+                if m.in_reply_to:
+                    assert isinstance(m.in_reply_to, list)
+                    parent_message_id = m.in_reply_to[0]
+                    try:
+                        parent_key = message_ids[parent_message_id]
+                    except KeyError:
+                        parent_key = Pending
+                        children.setdefault(parent_message_id, []).append(key)
+                else:
+                    parent_key = None
+                self.frontend.set_message(self._convert_message(
+                    m, key, parent_key))
+                for c in children.pop(m.message_id, ()):
+                    self.frontend.set_message_parent(c, key)
+                message_ids[m.message_id] = key
+            if data:
+                raise Exception("unhandled FETCH data: %r" % (data,))
+        for parent_message_id, child_list in children.items():
+            for c in children:
+                self.frontend.set_message_parent(c, None)
+        self.frontend.set_message_set(list(message_ids.values()))
 
-        messages = dict(self._parse_search(k, v) for k, v in data.items())
-        toplevel = []
-        for m in messages.values():
-            for p in m.in_reply_to + m.references:
-                try:
-                    messages[p].children.append(m)
-                    break
-                except KeyError:
-                    pass
-            else:
-                toplevel.append(m)
-
-        def thread_date(m):
-            return max([m.date] +
-                       [thread_date(c) for c in m.children])
-
-        toplevel.sort(key=thread_date, reverse=True)
-
-        def convert(o: ThreadMessage):
-            v = ThreadInfo(
-                flag=o.flag,
-                size=o.size,
-                date=o.date,
-                sender=o.from_,
-                recipients=', '.join(filter(None, (o.to, o.cc))),
-                subject=o.subject,
-                children=[convert(c) for c in o.children],
-                excerpt='',
-                message_id=o.message_id,
-            )
-            return ThreadInfoImap(v, mailbox, o.key)
-
-        return [convert(t) for t in toplevel]
-
-    async def fetch_message(self, threadinfo):
-        assert isinstance(threadinfo, ThreadInfoImap), type(threadinfo)
-        # mailbox = threadinfo.mailbox
-        message_key = threadinfo.message_key
-        # await self.backend.select_folder(mailbox.path)
+    async def fetch_message(self, message: MessageBase):
+        assert isinstance(message, MessageBase), type(message)
+        folder, uidvalidity, uid = message.key
+        select_response = await self._select_folder(folder.path)
+        folder_uidvalidity = select_response.get(b'UIDVALIDITY')
+        if folder_uidvalidity not in (None, uidvalidity):
+            raise NotImplementedError(
+                'fetch_message: UIDVALIDITY changed!')
         params = ['RFC822']
-        data, = (await self.backend.fetch([message_key], params)).values()
-        return data[b'RFC822']
+        data, = (await self.backend.fetch([uid], params)).values()
+        self.frontend.set_message_data(message.key, data[b'RFC822'])
 
 
 class ImapBackend:

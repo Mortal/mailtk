@@ -1,8 +1,8 @@
 import asyncio
 from mailtk.data import Mailbox, ThreadInfo
-from mailtk.accounts.base import AccountBase
+from mailtk.accounts.base import AccountData
 import traceback
-import pprint
+# import pprint
 import contextlib
 import functools
 import email
@@ -29,11 +29,15 @@ class MailboxAccount(Mailbox):
 class Controller:
     def __init__(self, loop, accounts, gui):
         self.loop = loop
-        self.accounts = accounts
+        self.accounts = {}
+        self.account_data = {
+            k: AccountData(k)
+            for k in accounts.keys()}
         self.gui = gui
         self.gui.controller = self
         self.statuses = []
-        self.init_accounts_result = self.ensure_future(self.init_accounts())
+        self.init_accounts_result = self.ensure_future(
+            self.init_accounts(accounts))
         self.pending_interaction = None
 
     @contextlib.contextmanager
@@ -68,10 +72,10 @@ class Controller:
         return asyncio.ensure_future(wrapper(), loop=self.loop)
 
     @status('Initializing accounts...')
-    async def init_accounts(self):
-        self.gui.set_accounts(self.accounts.keys())
+    async def init_accounts(self, accounts):
+        self.gui.set_accounts(accounts.keys())
         account_coros = []
-        for k, v in self.accounts.items():
+        for k, v in accounts.items():
             account_coros.append(self.init_account(k, v))
         await asyncio.gather(*account_coros, loop=self.loop,
                              return_exceptions=True)
@@ -80,7 +84,8 @@ class Controller:
     async def init_account(self, account_name, get_account):
         try:
             with self.set_status('Login %s...' % account_name):
-                account: AccountBase = await get_account(self)
+                account = self.accounts[account_name] = await get_account(
+                    loop, self.account_data[account_name])
         except Exception:
             self.log_exception("Failed to connect to %r" %
                                (account_name,))
@@ -124,7 +129,7 @@ class Controller:
         with self.set_status('Opening %s in %s...' %
                              (mailbox.name, folder.account_name)):
             try:
-                result = await folder.account.list_messages(mailbox)
+                await folder.account.list_messages(mailbox)
             except asyncio.CancelledError:
                 print("Cancelled set_selected_folder")
                 return
