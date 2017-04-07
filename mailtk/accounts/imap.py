@@ -1,3 +1,6 @@
+'''
+TODO: Use RFC 4551 MODSEQ for fast searches?
+'''
 import os
 import re
 import queue
@@ -46,6 +49,7 @@ class ImapAccount(AccountBase):
 
     def __init__(self, loop, host, port, ssl):
         self.backend = ImapBackend(loop, host, port, ssl)
+        self._selected_folder = None
 
     async def connect(self):
         await self.backend.connect()
@@ -79,58 +83,80 @@ class ImapAccount(AccountBase):
             children.setdefault('', []).insert(0, m)
         return children['']
 
-    async def list_messages(self, mailbox):
+    async def _select_folder(self, path):
+        if self._selected_folder == path:
+            return self._selected_response
+        self._selected_response = await self.backend.select_folder(path)
+        self._selected_folder = path
+        return self._selected_response
+
+    def _parse_flags(self, imap_flags):
+        if b'\\Answered' in imap_flags:
+            return Flag.replied
+        elif b'\\Seen' in imap_flags:
+            return Flag.read
+        elif b'\\Recent' in imap_flags:
+            return Flag.new
+        else:
+            return Flag.unread
+
+    def _parse_search(self, message_key, message_value):
+        message_value.pop(b'SEQ', None)
+        flag = self._parse_flags(message_value.pop(b'FLAGS'))
+        size = message_value.pop(b'RFC822.SIZE')
+        (k, message_bytes), = message_value.items()
+        assert k.startswith(b'BODY')
+        mime = email.message_from_bytes(message_bytes)
+
+        def header(k, d=None):
+            v = mime[k]
+            return d if v is None else str(decode_any_header(v))
+
+        message_id = header('Message-ID')
+        return message_id, ThreadMessage(
+            flag=flag,
+            size=size,
+            date=email.utils.parsedate_to_datetime(
+                header('Date')),
+            from_=header('From'),
+            to=header('To'),
+            cc=header('Cc'),
+            subject=header('Subject'),
+            message_id=message_id,
+            references=header('References', '').split(),
+            in_reply_to=header('In-Reply-To', '').split(),
+            key=message_key,
+            children=[],
+        )
+
+    async def list_messages(self, mailbox: MailboxImap):
+        # TODO: Sorting
         assert isinstance(mailbox, MailboxImap)
-        n_messages = await self.backend.select_folder(mailbox.path)
+        path = mailbox.path
+
+        select_response = await self._select_folder(path)
+        n_messages = select_response[b'EXISTS']
         if n_messages == 0:
+            print("No messages")
             return []
+        flags = select_response[b'FLAGS']
+        recent = select_response[b'RECENT']
+        uidvalidity = select_response.get(b'UIDVALIDITY')
+
+        # TODO: Use MODSEQ in SEARCH
         message_ids = await self.backend.search()
         params = [
             'FLAGS', 'RFC822.SIZE',
             'BODY.PEEK[HEADER.FIELDS (Date From To Cc Subject ' +
             'Message-ID References In-Reply-To)]']
-        data = await self.backend.fetch(message_ids, params)
+        block_size = 4
+        for i in range(0, len(message_ids), block_size):
+            j = min(i+block_size, len(message_ids))
+            data = await self.backend.fetch(message_ids[i:j], params)
+            for uid in message_ids[i:j]:
+                m = self._parse_search(uid, data[uid])
 
-        def parse_flags(imap_flags):
-            if b'\\Answered' in imap_flags:
-                return Flag.replied
-            elif b'\\Seen' in imap_flags:
-                return Flag.read
-            elif b'\\Recent' in imap_flags:
-                return Flag.new
-            else:
-                return Flag.unread
-
-        def parse(message_key, message_value):
-            message_value.pop(b'SEQ', None)
-            flag = parse_flags(message_value.pop(b'FLAGS'))
-            size = message_value.pop(b'RFC822.SIZE')
-            (k, message_bytes), = message_value.items()
-            assert k.startswith(b'BODY')
-            mime = email.message_from_bytes(message_bytes)
-
-            def header(k, d=None):
-                v = mime[k]
-                return d if v is None else str(decode_any_header(v))
-
-            message_id = header('Message-ID')
-            return message_id, ThreadMessage(
-                flag=flag,
-                size=size,
-                date=email.utils.parsedate_to_datetime(
-                    header('Date')),
-                from_=header('From'),
-                to=header('To'),
-                cc=header('Cc'),
-                subject=header('Subject'),
-                message_id=message_id,
-                references=header('References', '').split(),
-                in_reply_to=header('In-Reply-To', '').split(),
-                key=message_key,
-                children=[],
-            )
-
-        messages = dict(parse(k, v) for k, v in data.items())
+        messages = dict(self._parse_search(k, v) for k, v in data.items())
         toplevel = []
         for m in messages.values():
             for p in m.in_reply_to + m.references:
@@ -158,6 +184,7 @@ class ImapAccount(AccountBase):
                 subject=o.subject,
                 children=[convert(c) for c in o.children],
                 excerpt='',
+                message_id=o.message_id,
             )
             return ThreadInfoImap(v, mailbox, o.key)
 

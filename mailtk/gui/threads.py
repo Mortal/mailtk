@@ -5,7 +5,7 @@ from mailtk.gui.bmp import bmp_call
 
 
 class Threads(tkinter.ttk.Frame, WidgetMixin):
-    thread_columns = ('sender', 'flag', 'size', 'date', 'excerpt')
+    thread_columns = ('sender', 'flag', 'size', 'date', 'excerpt', 'message_id')
 
     def __init__(self, parent):
         super().__init__(parent)
