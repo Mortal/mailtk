@@ -33,14 +33,6 @@ class MailboxImap(Mailbox):
         return self.key
 
 
-def imap_unescape(v):
-    if v.startswith('"'):
-        mo = re.match(r'^"(?:[^"\\]|\\")*"$', v)
-        assert mo
-        return v[1:-1].replace('\\"', '"')
-    return v
-
-
 class ImapAccount(AccountBase):
     @classmethod
     async def initialize(cls, loop, host, port, username, password, ssl=False):
