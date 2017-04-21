@@ -54,23 +54,28 @@ class MessageBase(namedtuple.abc):
     - Short substring of body text
     message_id: str
     - RFC822.Message-Id header
-    folder_key: hashable, account-specific
     key: hashable, account-specific
     parent_key: hashable, account-specific
     '''
     _fields = ('flag', 'size', 'date', 'sender', 'recipients', 'subject',
-               'excerpt', 'message_id', 'folder_key', 'key', 'parent_key')
+               'excerpt', 'message_id', 'key', 'parent_key')
 
 
-class Mailbox(namedtuple.abc):
+class Folder(namedtuple.abc):
     _fields = 'name key parent_key'
 
 
 class AccountData:
-    def __init__(self, account_key):
-        self.account_key = account_key
+    pass
 
-    def set_folder(self, folder: Mailbox):
+
+class SimpleAccountData(AccountData):
+    def __init__(self, account_key):
+        self._folders = {}
+        self._messages = {}
+        self._message_data = {}
+
+    def set_folder(self, folder: Folder):
         self._folders[folder.key] = folder
 
     def set_folder_set(self, keys):
@@ -78,15 +83,8 @@ class AccountData:
         for o in stale:
             del self._folders[o]
 
-    def set_folder_parent(self, folder_key, parent_key):
-        raise NotImplementedError
-
     def set_message(self, message: MessageBase):
         self._messages[message.key] = message
-
-    def set_message_parent(self, message_key, parent_key):
-        self._messages[message_key] = (
-            self._messages[message_key].replace_parent(parent_key))
 
     def set_message_set(self, keys):
         stale = set(self._messages.keys()) - set(keys)

@@ -16,9 +16,6 @@ from mailtk.util import decode_any_header
 from mailtk.accounts.base import AccountBase, AccountData, Pending
 
 
-asyncio.Event
-
-
 class _ThreadMessage(namedtuple.abc):
     _fields = (
         'flag', 'size', 'date', 'from_', 'to', 'cc', 'subject',
@@ -144,7 +141,6 @@ class ImapAccount(AccountBase):
             subject=o.subject,
             excerpt='',
             message_id=o.message_id,
-            folder_key=folder.key,
             key=key,
             parent_key=parent_key,
         )
@@ -175,13 +171,14 @@ class ImapAccount(AccountBase):
             'BODY.PEEK[HEADER.FIELDS (Date From To Cc Subject ' +
             'Message-ID References In-Reply-To)]']
         block_size = 4
-        children = {}
         message_ids = {}  # map RFC822.Message-Id to MessageBase.key
+        existing = []
+        children = {}
         for i in range(0, len(uids), block_size):
             j = min(i+block_size, len(uids))
             data = await self.backend.fetch(uids[i:j], params)
             for uid in uids[i:j]:
-                key = (mailbox, uidvalidity, uid)
+                key = (mailbox.path, uidvalidity, uid)
                 m = self._parse_search(data.pop(uid))
                 if m.in_reply_to:
                     assert isinstance(m.in_reply_to, list)
@@ -196,13 +193,14 @@ class ImapAccount(AccountBase):
                 self.frontend.set_message(self._convert_message(
                     m, key, parent_key))
                 for c in children.pop(m.message_id, ()):
-                    self.frontend.set_message_parent(c, key)
+                    c2 = c.replace(parent_key=key)
+                    self.frontend.set_message(c2)
                 message_ids[m.message_id] = key
             if data:
                 raise Exception("unhandled FETCH data: %r" % (data,))
         for parent_message_id, child_list in children.items():
             for c in children:
-                self.frontend.set_message_parent(c, None)
+                self.frontend.set_message(c.replace(parent_key=None))
         self.frontend.set_message_set(list(message_ids.values()))
 
     async def fetch_message(self, message: MessageBase):
