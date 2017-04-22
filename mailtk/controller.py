@@ -42,7 +42,6 @@ class Controller:
 
     @contextlib.contextmanager
     def set_status(self, text):
-        contextlib.ContextDecorator
         self.statuses.append(text)
         self.gui.set_status(' '.join(self.statuses))
         try:

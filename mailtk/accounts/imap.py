@@ -69,7 +69,7 @@ class ImapAccount(AccountBase):
             parent, sep, name = path.rpartition(delimiter)
             m = MailboxImap(
                 Mailbox(name, path, parent or None), flags)
-            self.frontend.set_folder(m)
+            self.frontend.set_folder(path, m)
             existing_folders.append(path)
             if name.upper() == 'INBOX':
                 add_inbox = False
@@ -78,7 +78,7 @@ class ImapAccount(AccountBase):
             # TODO what is the 'flags' of INBOX?
             m = MailboxImap(
                 Mailbox('INBOX', 'INBOX', None), None)
-            self.frontend.set_folder(m)
+            self.frontend.set_folder('INBOX', m)
             existing_folders.append('INBOX')
         self.frontend.set_folder_set(existing_folders)
 
@@ -129,10 +129,8 @@ class ImapAccount(AccountBase):
         self._uidvalidity_counter += 1
         return 'fake_%s' % self._uidvalidity_counter
 
-    def _convert_message(self, o: _ThreadMessage, key, parent_key):
-        folder = key[0]
-        assert isinstance(folder, MailboxImap)
-        v = MessageBase(
+    def _convert_message(self, o: _ThreadMessage):
+        return MessageBase(
             flag=o.flag,
             size=o.size,
             date=o.date,
@@ -141,8 +139,6 @@ class ImapAccount(AccountBase):
             subject=o.subject,
             excerpt='',
             message_id=o.message_id,
-            key=key,
-            parent_key=parent_key,
         )
         return v
 
@@ -171,7 +167,7 @@ class ImapAccount(AccountBase):
             'BODY.PEEK[HEADER.FIELDS (Date From To Cc Subject ' +
             'Message-ID References In-Reply-To)]']
         block_size = 4
-        message_ids = {}  # map RFC822.Message-Id to MessageBase.key
+        message_ids = {}  # map RFC822.Message-Id to keys
         existing = []
         children = {}
         for i in range(0, len(uids), block_size):
@@ -187,20 +183,20 @@ class ImapAccount(AccountBase):
                         parent_key = message_ids[parent_message_id]
                     except KeyError:
                         parent_key = Pending
-                        children.setdefault(parent_message_id, []).append(key)
                 else:
                     parent_key = None
-                self.frontend.set_message(self._convert_message(
-                    m, key, parent_key))
-                for c in children.pop(m.message_id, ()):
-                    c2 = c.replace(parent_key=key)
-                    self.frontend.set_message(c2)
+                message = self._convert_message(m)
+                self.frontend.set_message(key, message)
+                if parent_key is Pending:
+                    children.setdefault(parent_message_id, []).append(key)
+                for k in children.pop(m.message_id, ()):
+                    self.frontend.set_message_parent(k, key)
                 message_ids[m.message_id] = key
             if data:
                 raise Exception("unhandled FETCH data: %r" % (data,))
         for parent_message_id, child_list in children.items():
-            for c in children:
-                self.frontend.set_message(c.replace(parent_key=None))
+            for k in children:
+                self.frontend.set_message_parent(k, None)
         self.frontend.set_message_set(list(message_ids.values()))
 
     async def fetch_message(self, message: MessageBase):
