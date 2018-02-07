@@ -1,0 +1,11 @@
+Since an IMAP connection maintains a selected folder,
+a background operation on an IMAP folder should be preemptible and,
+if preempted, should automatically re-select the folder it was working on.
+
+	async with self.backend.preemptible_folder_access('INBOX') as folder:
+		message_ids = await folder.search()
+		data = await folder.fetch(message_ids, params)
+
+Can possibly be implemented in ImapBackend._command_queue,
+with automatically issuing SELECT when the command folder does not match
+the connection's currently selected folder.
