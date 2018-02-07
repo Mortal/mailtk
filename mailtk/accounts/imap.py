@@ -243,6 +243,7 @@ class ImapBackend:
                         result = getattr(conn, method)(*args)
                     except Exception as exn:
                         result = exn
+                # TODO use call_soon_threadsafe instead of _response_queue?
                 self._response_queue.put((future, result))
                 self._command_queue.task_done()
                 os.write(self._ready_w, b'x')
