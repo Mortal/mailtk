@@ -1,0 +1,15 @@
+[[source]]
+url = "https://pypi.python.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+aiotkinter = {git = "https://github.com/Mortal/aiotkinter"}
+google-api-python-client = "*"
+exchangelib = {git = "https://github.com/ecederstrand/exchangelib.git"}
+IMAPClient = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.6"
