@@ -16,9 +16,11 @@ Until then, the following vaporware goals should be kept in mind during developm
 ## Configuration
 
 Install [pipenv](https://github.com/pypa/pipenv#installation),
-clone this repository, and type `pipenv shell`, and `python -m mailtk`.
+clone this repository, and type `pipenv install`, and `pipenv run python -m mailtk`.
+Then an empty mail GUI should open up with no accounts configured.
 
-Create a file named `accounts.ini` in the directory from which you run
+To configure your mail accounts,
+create a file named `accounts.ini` in the directory from which you run
 `python -m mailtk`. The file is parsed by `mailtk/accounts/config.py`,
 and its structure is roughly as follows:
 
